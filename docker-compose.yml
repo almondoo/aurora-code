@@ -1,0 +1,16 @@
+services:
+  aurora-code:
+    build: .
+    ports:
+      - "4010:5173"
+    volumes:
+      - .:/app
+      - node_modules:/app/node_modules
+    environment:
+      - NODE_ENV=development
+    tty: true
+    stdin_open: true
+    command: tail -f /dev/null
+
+volumes:
+  node_modules:

@@ -1,0 +1,1186 @@
+'use client'
+
+import { useEffect, useRef, useState, useCallback } from 'react'
+
+// ============================================
+// シェーダーソース
+// ============================================
+
+const vertexShaderSource = `
+  attribute vec2 a_position;
+  void main() {
+    gl_Position = vec4(a_position, 0.0, 1.0);
+  }
+`
+
+const fragmentShaderSource = `
+  precision highp float;
+
+  uniform float u_time;
+  uniform vec2 u_resolution;
+  uniform float u_dataWave[16];
+  uniform float u_flowPhase;
+
+  float hash(vec2 p) {
+    return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
+  }
+
+  float noise(vec2 p) {
+    vec2 i = floor(p);
+    vec2 f = fract(p);
+    f = f * f * (3.0 - 2.0 * f);
+
+    float a = hash(i);
+    float b = hash(i + vec2(1.0, 0.0));
+    float c = hash(i + vec2(0.0, 1.0));
+    float d = hash(i + vec2(1.0, 1.0));
+
+    return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
+  }
+
+  float fbm(vec2 p) {
+    float value = 0.0;
+    float amplitude = 0.5;
+    for (int i = 0; i < 5; i++) {
+      value += amplitude * noise(p);
+      p *= 2.0;
+      amplitude *= 0.5;
+    }
+    return value;
+  }
+
+  vec3 auroraColor(float t, float intensity) {
+    vec3 green = vec3(0.1, 0.9, 0.4);
+    vec3 cyan = vec3(0.2, 0.8, 0.9);
+    vec3 purple = vec3(0.6, 0.2, 0.8);
+    vec3 pink = vec3(0.9, 0.3, 0.6);
+
+    float phase = t * 2.0 + u_time * 0.15;
+
+    vec3 color = mix(green, cyan, sin(phase) * 0.5 + 0.5);
+    color = mix(color, purple, sin(phase * 0.7 + 1.0) * 0.4 + 0.3);
+    color = mix(color, pink, sin(phase * 1.3 + 2.0) * 0.2 + 0.1);
+
+    return color * intensity;
+  }
+
+  float auroraWave(float x) {
+    float wave = 0.0;
+
+    wave += sin(x * 1.5 + u_time * 0.3) * 0.15;
+    wave += sin(x * 2.3 - u_time * 0.2) * 0.1;
+    wave += sin(x * 3.7 + u_time * 0.4) * 0.07;
+
+    for (int i = 0; i < 16; i++) {
+      float freq = float(i + 1) * 0.8;
+      float amp = u_dataWave[i] * 0.03;
+      wave += sin(x * freq + u_time * 0.1 * float(i + 1) + u_flowPhase * 0.1) * amp;
+    }
+
+    wave += fbm(vec2(x * 3.0, u_time * 0.2)) * 0.08;
+
+    return wave;
+  }
+
+  float auroraCurtain(vec2 uv) {
+    float curtain = 0.0;
+
+    for (int i = 0; i < 3; i++) {
+      float offset = float(i) * 0.15;
+      float speed = 0.1 + float(i) * 0.05;
+      float freq = 2.0 + float(i) * 1.5;
+
+      float wave = auroraWave(uv.x * freq + offset);
+      float baseY = 0.55 + offset * 0.1 + wave;
+
+      float dist = uv.y - baseY;
+      float curtainShape = exp(-dist * dist * 20.0) * 0.6;
+
+      float verticalWave = sin(uv.x * 15.0 + u_time * speed + float(i)) * 0.02;
+      curtainShape *= 1.0 + verticalWave;
+
+      float fadeDown = smoothstep(baseY - 0.3, baseY, uv.y);
+      curtainShape *= fadeDown;
+
+      curtain += curtainShape * (1.0 - float(i) * 0.2);
+    }
+
+    return curtain;
+  }
+
+  float mountains(float x) {
+    float mountain = 0.0;
+
+    mountain = max(mountain,
+      sin(x * 1.2 + 0.5) * 0.08 +
+      sin(x * 2.5 + 1.0) * 0.04 + 0.12
+    );
+
+    mountain = max(mountain,
+      sin(x * 1.8 + 2.0) * 0.1 +
+      sin(x * 3.2 + 0.3) * 0.05 + 0.08
+    );
+
+    mountain = max(mountain,
+      sin(x * 2.5 + 1.5) * 0.12 +
+      sin(x * 4.0 + 2.5) * 0.04 +
+      noise(vec2(x * 10.0, 0.0)) * 0.02 + 0.05
+    );
+
+    return mountain;
+  }
+
+  float stars(vec2 uv) {
+    float star = 0.0;
+
+    for (int i = 0; i < 3; i++) {
+      vec2 grid = uv * (50.0 + float(i) * 30.0);
+      vec2 id = floor(grid);
+      vec2 gv = fract(grid) - 0.5;
+
+      float n = hash(id + float(i) * 100.0);
+
+      if (n > 0.97) {
+        float size = (n - 0.97) * 30.0;
+        float twinkle = sin(u_time * (2.0 + n * 3.0) + n * 100.0) * 0.5 + 0.5;
+        float d = length(gv);
+        star += smoothstep(0.1 * size, 0.0, d) * twinkle * 0.8;
+      }
+    }
+
+    return star;
+  }
+
+  void main() {
+    vec2 uv = gl_FragCoord.xy / u_resolution;
+
+    vec3 nightTop = vec3(0.02, 0.02, 0.08);
+    vec3 nightBottom = vec3(0.01, 0.01, 0.03);
+    vec3 color = mix(nightBottom, nightTop, uv.y);
+
+    float starBrightness = stars(uv);
+    color += vec3(starBrightness) * vec3(0.9, 0.95, 1.0);
+
+    float aurora = auroraCurtain(uv);
+    vec3 auroraCol = auroraColor(uv.x + uv.y * 0.3, aurora);
+
+    float glow = aurora * 0.5;
+    vec3 glowColor = auroraColor(uv.x, glow) * 0.3;
+
+    color += auroraCol + glowColor;
+
+    float mountainHeight = mountains(uv.x * 6.28);
+    if (uv.y < mountainHeight) {
+      vec3 mountainColor = vec3(0.01, 0.015, 0.025);
+      mountainColor += auroraCol * 0.05 * (mountainHeight - uv.y) * 10.0;
+      color = mountainColor;
+    }
+
+    float vignette = 1.0 - length((uv - 0.5) * vec2(1.0, 0.6)) * 0.5;
+    color *= vignette;
+
+    color = pow(color, vec3(0.9));
+
+    gl_FragColor = vec4(color, 1.0);
+  }
+`
+
+// ============================================
+// 型定義
+// ============================================
+
+type ScanStatus = 'idle' | 'scanning' | 'processing' | 'success' | 'error'
+
+// ============================================
+// ユーティリティ関数
+// ============================================
+
+function createShader(gl: WebGLRenderingContext, type: number, source: string): WebGLShader | null {
+  const shader = gl.createShader(type)
+  if (!shader) return null
+
+  gl.shaderSource(shader, source)
+  gl.compileShader(shader)
+
+  if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
+    console.error('Shader compile error:', gl.getShaderInfoLog(shader))
+    gl.deleteShader(shader)
+    return null
+  }
+  return shader
+}
+
+function createProgram(gl: WebGLRenderingContext, vertexShader: WebGLShader, fragmentShader: WebGLShader): WebGLProgram | null {
+  const program = gl.createProgram()
+  if (!program) return null
+
+  gl.attachShader(program, vertexShader)
+  gl.attachShader(program, fragmentShader)
+  gl.linkProgram(program)
+
+  if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+    console.error('Program link error:', gl.getProgramInfoLog(program))
+    return null
+  }
+  return program
+}
+
+function splitIntoShares(data: string, numShares: number): Uint8Array[] {
+  const encoder = new TextEncoder()
+  const bytes = encoder.encode(data)
+  const paddedLength = Math.max(bytes.length, 32)
+  const padded = new Uint8Array(paddedLength)
+  padded.set(bytes)
+
+  const shares: Uint8Array[] = []
+
+  for (let i = 0; i < numShares - 1; i++) {
+    const share = new Uint8Array(paddedLength)
+    for (let j = 0; j < paddedLength; j++) {
+      share[j] = Math.floor(Math.random() * 256)
+    }
+    shares.push(share)
+  }
+
+  const lastShare = new Uint8Array(paddedLength)
+  for (let j = 0; j < paddedLength; j++) {
+    let xorResult = padded[j]
+    for (let i = 0; i < numShares - 1; i++) {
+      xorResult ^= shares[i][j]
+    }
+    lastShare[j] = xorResult
+  }
+  shares.push(lastShare)
+
+  return shares
+}
+
+function combineShares(shares: Uint8Array[]): string | null {
+  if (shares.length === 0) return null
+
+  const length = shares[0].length
+  const result = new Uint8Array(length)
+
+  for (let j = 0; j < length; j++) {
+    let xorResult = 0
+    for (const share of shares) {
+      xorResult ^= share[j]
+    }
+    result[j] = xorResult
+  }
+
+  let end = result.length
+  for (let i = 0; i < result.length; i++) {
+    if (result[i] === 0) {
+      end = i
+      break
+    }
+  }
+
+  const decoder = new TextDecoder()
+  return decoder.decode(result.slice(0, end))
+}
+
+function shareToWaveParams(share: Uint8Array): Float32Array {
+  const params = new Float32Array(16)
+  for (let i = 0; i < 16; i++) {
+    const byteIndex = i % share.length
+    params[i] = (share[byteIndex] / 255) * 0.5 + 0.25
+  }
+  return params
+}
+
+function waveParamsToShare(params: Float32Array, length: number = 32): Uint8Array {
+  const share = new Uint8Array(length)
+  for (let i = 0; i < length; i++) {
+    const paramIndex = i % params.length
+    const normalized = (params[paramIndex] - 0.25) / 0.5
+    share[i] = Math.round(Math.max(0, Math.min(255, normalized * 255)))
+  }
+  return share
+}
+
+function lerpParams(a: Float32Array, b: Float32Array, t: number): Float32Array {
+  const result = new Float32Array(16)
+  for (let i = 0; i < 16; i++) {
+    result[i] = a[i] + (b[i] - a[i]) * t
+  }
+  return result
+}
+
+// ============================================
+// メインコンポーネント
+// ============================================
+
+export default function AuroraCodeApp() {
+  const [mode, setMode] = useState<'display' | 'scan'>('display')
+  const [dataInput, setDataInput] = useState('Hello Aurora!')
+  const [decodedData, setDecodedData] = useState('')
+  const [isPlaying, setIsPlaying] = useState(true)
+  const [scanProgress, setScanProgress] = useState(0)
+  const [scanStatus, setScanStatus] = useState<ScanStatus>('idle')
+  const [collectedFrames, setCollectedFrames] = useState(0)
+  const [errorMessage, setErrorMessage] = useState('')
+  const [flowPhase, setFlowPhase] = useState(0)
+  const [cameraReady, setCameraReady] = useState(false)
+
+  const [detectionRate, setDetectionRate] = useState(0)
+  const [totalAttempts, setTotalAttempts] = useState(0)
+  const [successfulDetections, setSuccessfulDetections] = useState(0)
+
+  const displayCanvasRef = useRef<HTMLCanvasElement>(null)
+  const animationRef = useRef<number | null>(null)
+  const startTimeRef = useRef(Date.now())
+  const sharesRef = useRef<Uint8Array[]>([])
+
+  const videoRef = useRef<HTMLVideoElement>(null)
+  const scanCanvasRef = useRef<HTMLCanvasElement>(null)
+  const streamRef = useRef<MediaStream | null>(null)
+  const collectedSharesRef = useRef<Map<number, Uint8Array>>(new Map())
+  const scanAnimationRef = useRef<number | null>(null)
+
+  const TOTAL_FRAMES = 60
+  const REQUIRED_FRAMES = 45
+  const FLOW_SPEED = 0.5
+
+  // ============================================
+  // 表示側の実装（連続フロー）
+  // ============================================
+
+  useEffect(() => {
+    if (mode !== 'display') return
+
+    const canvas = displayCanvasRef.current
+    if (!canvas) return
+
+    const gl = canvas.getContext('webgl')
+    if (!gl) return
+
+    const vertexShader = createShader(gl, gl.VERTEX_SHADER, vertexShaderSource)
+    const fragmentShader = createShader(gl, gl.FRAGMENT_SHADER, fragmentShaderSource)
+    if (!vertexShader || !fragmentShader) return
+
+    const program = createProgram(gl, vertexShader, fragmentShader)
+    if (!program) return
+
+    const positionBuffer = gl.createBuffer()
+    gl.bindBuffer(gl.ARRAY_BUFFER, positionBuffer)
+    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([
+      -1, -1, 1, -1, -1, 1, 1, 1,
+    ]), gl.STATIC_DRAW)
+
+    const positionLocation = gl.getAttribLocation(program, 'a_position')
+    const timeLocation = gl.getUniformLocation(program, 'u_time')
+    const resolutionLocation = gl.getUniformLocation(program, 'u_resolution')
+    const dataWaveLocation = gl.getUniformLocation(program, 'u_dataWave')
+    const flowPhaseLocation = gl.getUniformLocation(program, 'u_flowPhase')
+
+    sharesRef.current = splitIntoShares(dataInput, TOTAL_FRAMES)
+
+    const render = () => {
+      if (!isPlaying) {
+        animationRef.current = requestAnimationFrame(render)
+        return
+      }
+
+      const time = (Date.now() - startTimeRef.current) / 1000
+
+      const displayWidth = canvas.clientWidth
+      const displayHeight = canvas.clientHeight
+
+      if (canvas.width !== displayWidth || canvas.height !== displayHeight) {
+        canvas.width = displayWidth
+        canvas.height = displayHeight
+        gl.viewport(0, 0, gl.canvas.width, gl.canvas.height)
+      }
+
+      gl.clearColor(0, 0, 0, 1)
+      gl.clear(gl.COLOR_BUFFER_BIT)
+
+      gl.useProgram(program)
+
+      gl.enableVertexAttribArray(positionLocation)
+      gl.bindBuffer(gl.ARRAY_BUFFER, positionBuffer)
+      gl.vertexAttribPointer(positionLocation, 2, gl.FLOAT, false, 0, 0)
+
+      gl.uniform1f(timeLocation, time)
+      gl.uniform2f(resolutionLocation, gl.canvas.width, gl.canvas.height)
+
+      const continuousIndex = (time * FLOW_SPEED) % TOTAL_FRAMES
+      const prevIndex = Math.floor(continuousIndex)
+      const nextIndex = (prevIndex + 1) % TOTAL_FRAMES
+      const t = continuousIndex - prevIndex
+
+      const prevShare = sharesRef.current[prevIndex] || new Uint8Array(32)
+      const nextShare = sharesRef.current[nextIndex] || new Uint8Array(32)
+      const prevParams = shareToWaveParams(prevShare)
+      const nextParams = shareToWaveParams(nextShare)
+      const waveParams = lerpParams(prevParams, nextParams, t)
+
+      setFlowPhase(continuousIndex)
+
+      gl.uniform1fv(dataWaveLocation, waveParams)
+      gl.uniform1f(flowPhaseLocation, continuousIndex)
+
+      gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4)
+
+      animationRef.current = requestAnimationFrame(render)
+    }
+
+    render()
+
+    return () => {
+      if (animationRef.current) {
+        cancelAnimationFrame(animationRef.current)
+      }
+    }
+  }, [mode, isPlaying, dataInput])
+
+  // ============================================
+  // 読取側の実装
+  // ============================================
+
+  const startCamera = useCallback(async () => {
+    setErrorMessage('')
+    setCameraReady(false)
+    setScanStatus('scanning')
+    collectedSharesRef.current = new Map()
+    setCollectedFrames(0)
+    setScanProgress(0)
+    setTotalAttempts(0)
+    setSuccessfulDetections(0)
+    setDetectionRate(0)
+
+    try {
+      const constraints: MediaStreamConstraints = {
+        video: {
+          facingMode: 'environment',
+          width: { ideal: 640 },
+          height: { ideal: 480 }
+        },
+        audio: false
+      }
+
+      const stream = await navigator.mediaDevices.getUserMedia(constraints)
+      streamRef.current = stream
+
+      const video = videoRef.current
+      if (video) {
+        video.srcObject = stream
+
+        video.onloadedmetadata = () => {
+          video.play().then(() => {
+            setCameraReady(true)
+            startScanning()
+          }).catch(err => {
+            console.error('Video play error:', err)
+            setErrorMessage('ビデオの再生に失敗しました: ' + err.message)
+            setScanStatus('error')
+          })
+        }
+      }
+    } catch (err) {
+      console.error('Camera error:', err)
+      const error = err as Error
+      setErrorMessage(`カメラエラー: ${error.name} - ${error.message}`)
+      setScanStatus('error')
+    }
+  }, [])
+
+  const stopCamera = useCallback(() => {
+    if (streamRef.current) {
+      streamRef.current.getTracks().forEach(track => track.stop())
+      streamRef.current = null
+    }
+    if (scanAnimationRef.current) {
+      cancelAnimationFrame(scanAnimationRef.current)
+      scanAnimationRef.current = null
+    }
+    setCameraReady(false)
+  }, [])
+
+  const startScanning = useCallback(() => {
+    const video = videoRef.current
+    const canvas = scanCanvasRef.current
+    if (!video || !canvas) return
+
+    const ctx = canvas.getContext('2d')
+    if (!ctx) return
+
+    let localTotalAttempts = 0
+    let localSuccessfulDetections = 0
+
+    const processFrame = () => {
+      if (!video || video.readyState < 2) {
+        scanAnimationRef.current = requestAnimationFrame(processFrame)
+        return
+      }
+
+      canvas.width = video.videoWidth || 640
+      canvas.height = video.videoHeight || 480
+
+      ctx.drawImage(video, 0, 0)
+
+      const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height)
+      const detectedParams = detectAuroraWaveParams(imageData)
+
+      localTotalAttempts++
+      setTotalAttempts(localTotalAttempts)
+
+      if (detectedParams) {
+        localSuccessfulDetections++
+        setSuccessfulDetections(localSuccessfulDetections)
+
+        const frameIndex = estimateFrameIndex(detectedParams)
+
+        if (!collectedSharesRef.current.has(frameIndex)) {
+          const share = waveParamsToShare(detectedParams)
+          collectedSharesRef.current.set(frameIndex, share)
+
+          const collected = collectedSharesRef.current.size
+          setCollectedFrames(collected)
+          setScanProgress((collected / REQUIRED_FRAMES) * 100)
+
+          if (collected >= REQUIRED_FRAMES) {
+            decodeCollectedData()
+            return
+          }
+        }
+      }
+
+      if (localTotalAttempts > 0) {
+        setDetectionRate((localSuccessfulDetections / localTotalAttempts) * 100)
+      }
+
+      scanAnimationRef.current = requestAnimationFrame(processFrame)
+    }
+
+    processFrame()
+  }, [])
+
+  const detectAuroraWaveParams = (imageData: ImageData): Float32Array | null => {
+    const { width, height, data } = imageData
+
+    const waveProfile = new Array(32).fill(0)
+    const columnWidth = Math.floor(width / 32)
+
+    for (let col = 0; col < 32; col++) {
+      const startX = col * columnWidth
+      const endX = Math.min(startX + columnWidth, width)
+
+      let maxBrightness = 0
+      let maxY = 0
+
+      for (let x = startX; x < endX; x++) {
+        for (let y = 0; y < height; y++) {
+          const idx = (y * width + x) * 4
+          const r = data[idx]
+          const g = data[idx + 1]
+          const b = data[idx + 2]
+
+          const auroraBrightness = g * 0.6 + b * 0.3 - r * 0.3
+
+          if (auroraBrightness > maxBrightness && auroraBrightness > 50) {
+            maxBrightness = auroraBrightness
+            maxY = y
+          }
+        }
+      }
+
+      waveProfile[col] = maxY / height
+    }
+
+    const validColumns = waveProfile.filter(v => v > 0.1 && v < 0.9).length
+    if (validColumns < 16) {
+      return null
+    }
+
+    const params = new Float32Array(16)
+    for (let i = 0; i < 16; i++) {
+      let sum = 0
+      for (let j = 0; j < 32; j++) {
+        sum += waveProfile[j] * Math.sin((i + 1) * j * Math.PI / 16)
+      }
+      params[i] = Math.abs(sum / 32) + 0.25
+    }
+
+    return params
+  }
+
+  const estimateFrameIndex = (params: Float32Array): number => {
+    let hash = 0
+    for (let i = 0; i < params.length; i++) {
+      hash = ((hash << 5) - hash + Math.floor(params[i] * 1000)) | 0
+    }
+    return Math.abs(hash) % TOTAL_FRAMES
+  }
+
+  const decodeCollectedData = () => {
+    setScanStatus('processing')
+    stopCamera()
+
+    setTimeout(() => {
+      try {
+        const shares = Array.from(collectedSharesRef.current.values())
+        const decoded = combineShares(shares)
+
+        if (decoded && decoded.length > 0) {
+          setDecodedData(decoded)
+          setScanStatus('success')
+        } else {
+          setDecodedData('')
+          setScanStatus('error')
+          setErrorMessage('データの復号に失敗しました。')
+        }
+      } catch (err) {
+        console.error('Decode error:', err)
+        setScanStatus('error')
+        setErrorMessage('復号中にエラーが発生しました。')
+      }
+    }, 500)
+  }
+
+  const resetScan = useCallback(() => {
+    stopCamera()
+    setScanStatus('idle')
+    setDecodedData('')
+    setCollectedFrames(0)
+    setScanProgress(0)
+    setErrorMessage('')
+    setTotalAttempts(0)
+    setSuccessfulDetections(0)
+    setDetectionRate(0)
+  }, [stopCamera])
+
+  useEffect(() => {
+    if (mode === 'display') {
+      stopCamera()
+    }
+    return () => {
+      stopCamera()
+    }
+  }, [mode, stopCamera])
+
+  // ============================================
+  // レンダリング
+  // ============================================
+
+  return (
+    <div style={{
+      width: '100vw',
+      height: '100vh',
+      background: '#000',
+      display: 'flex',
+      flexDirection: 'column',
+      fontFamily: "'SF Pro Display', -apple-system, BlinkMacSystemFont, sans-serif",
+      overflow: 'hidden',
+    }}>
+      {/* ヘッダー */}
+      <div style={{
+        position: 'absolute',
+        top: 0,
+        left: 0,
+        right: 0,
+        padding: '16px 20px',
+        display: 'flex',
+        justifyContent: 'space-between',
+        alignItems: 'center',
+        zIndex: 10,
+        background: 'linear-gradient(to bottom, rgba(0,0,0,0.8) 0%, transparent 100%)',
+      }}>
+        <div>
+          <h1 style={{
+            margin: 0,
+            fontSize: '20px',
+            fontWeight: 600,
+            color: '#fff',
+            letterSpacing: '-0.5px',
+          }}>
+            Aurora Code
+          </h1>
+        </div>
+
+        <div style={{
+          display: 'flex',
+          background: 'rgba(255,255,255,0.1)',
+          borderRadius: '10px',
+          padding: '3px',
+        }}>
+          <button
+            onClick={() => setMode('display')}
+            style={{
+              padding: '8px 16px',
+              borderRadius: '8px',
+              border: 'none',
+              background: mode === 'display' ? 'rgba(16, 185, 129, 0.9)' : 'transparent',
+              color: '#fff',
+              fontSize: '12px',
+              fontWeight: 500,
+              cursor: 'pointer',
+            }}
+          >
+            Display
+          </button>
+          <button
+            onClick={() => { setMode('scan'); resetScan() }}
+            style={{
+              padding: '8px 16px',
+              borderRadius: '8px',
+              border: 'none',
+              background: mode === 'scan' ? 'rgba(16, 185, 129, 0.9)' : 'transparent',
+              color: '#fff',
+              fontSize: '12px',
+              fontWeight: 500,
+              cursor: 'pointer',
+            }}
+          >
+            Scan
+          </button>
+        </div>
+      </div>
+
+      {/* 表示モード */}
+      {mode === 'display' && (
+        <>
+          <canvas
+            ref={displayCanvasRef}
+            style={{
+              width: '100%',
+              height: '100%',
+              display: 'block',
+            }}
+          />
+
+          <div style={{
+            position: 'absolute',
+            top: '70px',
+            right: '20px',
+            background: 'rgba(0,0,0,0.7)',
+            padding: '8px 12px',
+            borderRadius: '8px',
+            zIndex: 10,
+          }}>
+            <div style={{ fontSize: '9px', color: 'rgba(255,255,255,0.5)', marginBottom: '2px' }}>
+              FLOW
+            </div>
+            <div style={{ fontSize: '20px', fontWeight: 700, color: '#10b981', fontFamily: 'monospace' }}>
+              {flowPhase.toFixed(1)}
+            </div>
+          </div>
+
+          <div style={{
+            position: 'absolute',
+            top: '70px',
+            left: '20px',
+            display: 'flex',
+            alignItems: 'center',
+            gap: '8px',
+            zIndex: 10,
+          }}>
+            <div style={{
+              width: '8px',
+              height: '8px',
+              borderRadius: '50%',
+              background: isPlaying ? '#10b981' : '#f59e0b',
+              boxShadow: isPlaying ? '0 0 10px #10b981' : 'none',
+            }} />
+            <span style={{ fontSize: '11px', color: 'rgba(255,255,255,0.6)' }}>
+              {isPlaying ? 'Broadcasting' : 'Paused'}
+            </span>
+          </div>
+
+          <div style={{
+            position: 'absolute',
+            bottom: 0,
+            left: 0,
+            right: 0,
+            padding: '20px',
+            background: 'linear-gradient(to top, rgba(0,0,0,0.9) 0%, transparent 100%)',
+            zIndex: 10,
+          }}>
+            <div style={{ maxWidth: '450px', margin: '0 auto' }}>
+              <label style={{
+                display: 'block',
+                fontSize: '10px',
+                color: 'rgba(255,255,255,0.4)',
+                marginBottom: '6px',
+                textTransform: 'uppercase',
+                letterSpacing: '1px',
+              }}>
+                Secret Message
+              </label>
+              <div style={{ display: 'flex', gap: '8px' }}>
+                <input
+                  type="text"
+                  value={dataInput}
+                  onChange={(e) => setDataInput(e.target.value)}
+                  placeholder="Enter secret message..."
+                  style={{
+                    flex: 1,
+                    padding: '10px 14px',
+                    borderRadius: '8px',
+                    border: '1px solid rgba(255,255,255,0.15)',
+                    background: 'rgba(255,255,255,0.08)',
+                    color: '#fff',
+                    fontSize: '14px',
+                    outline: 'none',
+                  }}
+                />
+                <button
+                  onClick={() => setIsPlaying(!isPlaying)}
+                  style={{
+                    padding: '10px 16px',
+                    borderRadius: '8px',
+                    border: 'none',
+                    background: isPlaying ? 'rgba(239, 68, 68, 0.8)' : 'rgba(16, 185, 129, 0.8)',
+                    color: '#fff',
+                    fontSize: '12px',
+                    fontWeight: 600,
+                    cursor: 'pointer',
+                  }}
+                >
+                  {isPlaying ? '||' : '>'}
+                </button>
+              </div>
+            </div>
+          </div>
+        </>
+      )}
+
+      {/* スキャンモード */}
+      {mode === 'scan' && (
+        <div style={{
+          flex: 1,
+          display: 'flex',
+          flexDirection: 'column',
+          alignItems: 'center',
+          justifyContent: 'center',
+          padding: '70px 20px 20px',
+        }}>
+          {scanStatus === 'idle' && (
+            <div style={{ textAlign: 'center', maxWidth: '320px' }}>
+              <div style={{
+                width: '100px',
+                height: '100px',
+                borderRadius: '50%',
+                background: 'linear-gradient(135deg, rgba(16, 185, 129, 0.2) 0%, rgba(6, 182, 212, 0.2) 100%)',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                margin: '0 auto 20px',
+                border: '2px solid rgba(16, 185, 129, 0.3)',
+              }}>
+                <span style={{ fontSize: '40px' }}>SCAN</span>
+              </div>
+              <h2 style={{ color: '#fff', fontSize: '18px', marginBottom: '10px' }}>
+                Ready to Scan
+              </h2>
+              <p style={{ color: 'rgba(255,255,255,0.5)', fontSize: '13px', marginBottom: '20px' }}>
+                Point camera at Aurora Code display
+              </p>
+
+              {errorMessage && (
+                <div style={{
+                  background: 'rgba(239, 68, 68, 0.1)',
+                  border: '1px solid rgba(239, 68, 68, 0.3)',
+                  borderRadius: '8px',
+                  padding: '12px',
+                  marginBottom: '16px',
+                }}>
+                  <p style={{ color: '#ef4444', fontSize: '12px', margin: 0 }}>
+                    {errorMessage}
+                  </p>
+                </div>
+              )}
+
+              <button
+                onClick={startCamera}
+                style={{
+                  padding: '14px 32px',
+                  borderRadius: '12px',
+                  border: 'none',
+                  background: 'linear-gradient(135deg, #10b981 0%, #06b6d4 100%)',
+                  color: '#fff',
+                  fontSize: '15px',
+                  fontWeight: 600,
+                  cursor: 'pointer',
+                  boxShadow: '0 4px 15px rgba(16, 185, 129, 0.3)',
+                }}
+              >
+                Start Camera
+              </button>
+            </div>
+          )}
+
+          {(scanStatus === 'scanning' || scanStatus === 'processing') && (
+            <div style={{ width: '100%', maxWidth: '400px' }}>
+              <div style={{
+                position: 'relative',
+                borderRadius: '12px',
+                overflow: 'hidden',
+                background: '#111',
+                marginBottom: '16px',
+              }}>
+                <video
+                  ref={videoRef}
+                  autoPlay
+                  playsInline
+                  muted
+                  style={{
+                    width: '100%',
+                    height: 'auto',
+                    display: 'block',
+                    minHeight: '240px',
+                  }}
+                />
+                <canvas ref={scanCanvasRef} style={{ display: 'none' }} />
+
+                {!cameraReady && (
+                  <div style={{
+                    position: 'absolute',
+                    inset: 0,
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    background: 'rgba(0,0,0,0.8)',
+                  }}>
+                    <div style={{ textAlign: 'center' }}>
+                      <div style={{ fontSize: '24px', marginBottom: '8px' }}>...</div>
+                      <p style={{ color: 'rgba(255,255,255,0.6)', fontSize: '12px' }}>
+                        Starting camera...
+                      </p>
+                    </div>
+                  </div>
+                )}
+
+                <div style={{
+                  position: 'absolute',
+                  inset: 0,
+                  border: '2px solid rgba(16, 185, 129, 0.5)',
+                  borderRadius: '12px',
+                  pointerEvents: 'none',
+                }} />
+              </div>
+
+              <div style={{
+                background: 'rgba(255,255,255,0.1)',
+                borderRadius: '10px',
+                padding: '14px',
+                marginBottom: '12px',
+              }}>
+                <div style={{
+                  display: 'flex',
+                  justifyContent: 'space-between',
+                  marginBottom: '8px',
+                }}>
+                  <span style={{ color: 'rgba(255,255,255,0.6)', fontSize: '12px' }}>
+                    {scanStatus === 'processing' ? 'Decoding...' : 'Collecting frames...'}
+                  </span>
+                  <span style={{ color: '#10b981', fontSize: '12px', fontWeight: 600 }}>
+                    {collectedFrames}/{REQUIRED_FRAMES}
+                  </span>
+                </div>
+                <div style={{
+                  height: '6px',
+                  background: 'rgba(255,255,255,0.1)',
+                  borderRadius: '3px',
+                  overflow: 'hidden',
+                }}>
+                  <div style={{
+                    height: '100%',
+                    width: `${Math.min(scanProgress, 100)}%`,
+                    background: 'linear-gradient(90deg, #10b981 0%, #06b6d4 100%)',
+                    borderRadius: '3px',
+                    transition: 'width 0.2s ease',
+                  }} />
+                </div>
+
+                <div style={{ display: 'flex', gap: '16px', marginTop: '12px' }}>
+                  <div>
+                    <span style={{ color: 'rgba(255,255,255,0.5)', fontSize: '11px' }}>検出率</span>
+                    <div style={{
+                      color: detectionRate > 50 ? '#10b981' : '#f59e0b',
+                      fontSize: '16px',
+                      fontWeight: 600
+                    }}>
+                      {detectionRate.toFixed(1)}%
+                    </div>
+                  </div>
+                  <div>
+                    <span style={{ color: 'rgba(255,255,255,0.5)', fontSize: '11px' }}>品質</span>
+                    <div style={{
+                      color: detectionRate > 70 ? '#10b981' : detectionRate > 30 ? '#f59e0b' : '#ef4444',
+                      fontSize: '16px',
+                      fontWeight: 600
+                    }}>
+                      {detectionRate > 70 ? '良好' : detectionRate > 30 ? '普通' : '低い'}
+                    </div>
+                  </div>
+                  <div>
+                    <span style={{ color: 'rgba(255,255,255,0.5)', fontSize: '11px' }}>試行</span>
+                    <div style={{
+                      color: 'rgba(255,255,255,0.8)',
+                      fontSize: '16px',
+                      fontWeight: 600
+                    }}>
+                      {totalAttempts}
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <button
+                onClick={resetScan}
+                style={{
+                  width: '100%',
+                  padding: '10px',
+                  borderRadius: '8px',
+                  border: '1px solid rgba(255,255,255,0.2)',
+                  background: 'rgba(255,255,255,0.1)',
+                  color: '#fff',
+                  fontSize: '13px',
+                  cursor: 'pointer',
+                }}
+              >
+                Cancel
+              </button>
+            </div>
+          )}
+
+          {scanStatus === 'success' && (
+            <div style={{ textAlign: 'center', maxWidth: '350px' }}>
+              <div style={{
+                width: '70px',
+                height: '70px',
+                borderRadius: '50%',
+                background: 'rgba(16, 185, 129, 0.2)',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                margin: '0 auto 16px',
+              }}>
+                <span style={{ fontSize: '32px', color: '#10b981' }}>OK</span>
+              </div>
+              <h2 style={{ color: '#10b981', fontSize: '18px', marginBottom: '14px' }}>
+                Decoded Successfully!
+              </h2>
+
+              <div style={{
+                display: 'flex',
+                justifyContent: 'center',
+                gap: '20px',
+                marginBottom: '14px',
+              }}>
+                <div style={{ textAlign: 'center' }}>
+                  <div style={{ color: 'rgba(255,255,255,0.5)', fontSize: '10px' }}>検出率</div>
+                  <div style={{ color: '#10b981', fontSize: '14px', fontWeight: 600 }}>
+                    {detectionRate.toFixed(1)}%
+                  </div>
+                </div>
+                <div style={{ textAlign: 'center' }}>
+                  <div style={{ color: 'rgba(255,255,255,0.5)', fontSize: '10px' }}>総試行</div>
+                  <div style={{ color: 'rgba(255,255,255,0.8)', fontSize: '14px', fontWeight: 600 }}>
+                    {totalAttempts}
+                  </div>
+                </div>
+              </div>
+
+              <div style={{
+                background: 'rgba(16, 185, 129, 0.1)',
+                border: '1px solid rgba(16, 185, 129, 0.3)',
+                borderRadius: '10px',
+                padding: '16px',
+                marginBottom: '16px',
+              }}>
+                <div style={{
+                  fontSize: '10px',
+                  color: 'rgba(255,255,255,0.5)',
+                  marginBottom: '6px',
+                  textTransform: 'uppercase',
+                  letterSpacing: '1px',
+                }}>
+                  Message
+                </div>
+                <div style={{
+                  color: '#fff',
+                  fontSize: '16px',
+                  fontWeight: 500,
+                  wordBreak: 'break-all',
+                }}>
+                  {decodedData}
+                </div>
+              </div>
+              <button
+                onClick={resetScan}
+                style={{
+                  padding: '10px 24px',
+                  borderRadius: '8px',
+                  border: 'none',
+                  background: 'rgba(255,255,255,0.1)',
+                  color: '#fff',
+                  fontSize: '13px',
+                  cursor: 'pointer',
+                }}
+              >
+                Scan Another
+              </button>
+            </div>
+          )}
+
+          {scanStatus === 'error' && (
+            <div style={{ textAlign: 'center', maxWidth: '320px' }}>
+              <div style={{
+                width: '70px',
+                height: '70px',
+                borderRadius: '50%',
+                background: 'rgba(239, 68, 68, 0.2)',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                margin: '0 auto 16px',
+              }}>
+                <span style={{ fontSize: '32px', color: '#ef4444' }}>X</span>
+              </div>
+              <h2 style={{ color: '#ef4444', fontSize: '18px', marginBottom: '10px' }}>
+                Error
+              </h2>
+              {errorMessage && (
+                <p style={{
+                  color: 'rgba(255,255,255,0.6)',
+                  fontSize: '13px',
+                  marginBottom: '16px',
+                  wordBreak: 'break-all',
+                }}>
+                  {errorMessage}
+                </p>
+              )}
+              <button
+                onClick={resetScan}
+                style={{
+                  padding: '10px 24px',
+                  borderRadius: '8px',
+                  border: 'none',
+                  background: 'rgba(239, 68, 68, 0.8)',
+                  color: '#fff',
+                  fontSize: '13px',
+                  cursor: 'pointer',
+                }}
+              >
+                Try Again
+              </button>
+            </div>
+          )}
+        </div>
+      )}
+
+      <style>{`
+        input::placeholder {
+          color: rgba(255,255,255,0.3);
+        }
+        button:active {
+          transform: scale(0.98);
+        }
+      `}</style>
+    </div>
+  )
+}
