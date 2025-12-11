@@ -1,6 +1,10 @@
 'use client'
 
 import { useEffect, useRef, useState, useCallback } from 'react'
+import { encodeData, EncodedPacket, AuroraFrame } from '../lib/encoding/frameEncoder'
+import { frameToVisual, bandIndicesToUniform, VisualFrame } from '../lib/visual/bandEncoder'
+import { detectFrame } from '../lib/detection/detector'
+import { FrameDecoder, DecoderProgress } from '../lib/detection/decoder'
 
 // ============================================
 // シェーダーソース
@@ -18,8 +22,29 @@ const fragmentShaderSource = `
 
   uniform float u_time;
   uniform vec2 u_resolution;
-  uniform float u_dataWave[16];
-  uniform float u_flowPhase;
+  uniform float u_bandData[32];
+  uniform float u_frameIndex;
+  uniform float u_isSyncFrame;
+
+  // 16色オーロラパレット
+  vec3 getPaletteColor(int idx) {
+    if (idx == 0) return vec3(0.078, 0.235, 0.157);
+    if (idx == 1) return vec3(0.118, 0.353, 0.196);
+    if (idx == 2) return vec3(0.157, 0.471, 0.235);
+    if (idx == 3) return vec3(0.196, 0.588, 0.275);
+    if (idx == 4) return vec3(0.157, 0.627, 0.471);
+    if (idx == 5) return vec3(0.196, 0.706, 0.588);
+    if (idx == 6) return vec3(0.235, 0.784, 0.706);
+    if (idx == 7) return vec3(0.314, 0.863, 0.784);
+    if (idx == 8) return vec3(0.314, 0.549, 0.784);
+    if (idx == 9) return vec3(0.392, 0.471, 0.784);
+    if (idx == 10) return vec3(0.510, 0.392, 0.784);
+    if (idx == 11) return vec3(0.627, 0.353, 0.784);
+    if (idx == 12) return vec3(0.706, 0.392, 0.706);
+    if (idx == 13) return vec3(0.784, 0.431, 0.627);
+    if (idx == 14) return vec3(0.863, 0.510, 0.588);
+    return vec3(0.941, 0.627, 0.627);
+  }
 
   float hash(vec2 p) {
     return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
@@ -29,117 +54,28 @@ const fragmentShaderSource = `
     vec2 i = floor(p);
     vec2 f = fract(p);
     f = f * f * (3.0 - 2.0 * f);
-
     float a = hash(i);
     float b = hash(i + vec2(1.0, 0.0));
     float c = hash(i + vec2(0.0, 1.0));
     float d = hash(i + vec2(1.0, 1.0));
-
     return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
-  }
-
-  float fbm(vec2 p) {
-    float value = 0.0;
-    float amplitude = 0.5;
-    for (int i = 0; i < 5; i++) {
-      value += amplitude * noise(p);
-      p *= 2.0;
-      amplitude *= 0.5;
-    }
-    return value;
-  }
-
-  vec3 auroraColor(float t, float intensity) {
-    vec3 green = vec3(0.1, 0.9, 0.4);
-    vec3 cyan = vec3(0.2, 0.8, 0.9);
-    vec3 purple = vec3(0.6, 0.2, 0.8);
-    vec3 pink = vec3(0.9, 0.3, 0.6);
-
-    float phase = t * 2.0 + u_time * 0.15;
-
-    vec3 color = mix(green, cyan, sin(phase) * 0.5 + 0.5);
-    color = mix(color, purple, sin(phase * 0.7 + 1.0) * 0.4 + 0.3);
-    color = mix(color, pink, sin(phase * 1.3 + 2.0) * 0.2 + 0.1);
-
-    return color * intensity;
-  }
-
-  float auroraWave(float x) {
-    float wave = 0.0;
-
-    wave += sin(x * 1.5 + u_time * 0.3) * 0.15;
-    wave += sin(x * 2.3 - u_time * 0.2) * 0.1;
-    wave += sin(x * 3.7 + u_time * 0.4) * 0.07;
-
-    for (int i = 0; i < 16; i++) {
-      float freq = float(i + 1) * 0.8;
-      float amp = u_dataWave[i] * 0.03;
-      wave += sin(x * freq + u_time * 0.1 * float(i + 1) + u_flowPhase * 0.1) * amp;
-    }
-
-    wave += fbm(vec2(x * 3.0, u_time * 0.2)) * 0.08;
-
-    return wave;
-  }
-
-  float auroraCurtain(vec2 uv) {
-    float curtain = 0.0;
-
-    for (int i = 0; i < 3; i++) {
-      float offset = float(i) * 0.15;
-      float speed = 0.1 + float(i) * 0.05;
-      float freq = 2.0 + float(i) * 1.5;
-
-      float wave = auroraWave(uv.x * freq + offset);
-      float baseY = 0.55 + offset * 0.1 + wave;
-
-      float dist = uv.y - baseY;
-      float curtainShape = exp(-dist * dist * 20.0) * 0.6;
-
-      float verticalWave = sin(uv.x * 15.0 + u_time * speed + float(i)) * 0.02;
-      curtainShape *= 1.0 + verticalWave;
-
-      float fadeDown = smoothstep(baseY - 0.3, baseY, uv.y);
-      curtainShape *= fadeDown;
-
-      curtain += curtainShape * (1.0 - float(i) * 0.2);
-    }
-
-    return curtain;
   }
 
   float mountains(float x) {
     float mountain = 0.0;
-
-    mountain = max(mountain,
-      sin(x * 1.2 + 0.5) * 0.08 +
-      sin(x * 2.5 + 1.0) * 0.04 + 0.12
-    );
-
-    mountain = max(mountain,
-      sin(x * 1.8 + 2.0) * 0.1 +
-      sin(x * 3.2 + 0.3) * 0.05 + 0.08
-    );
-
-    mountain = max(mountain,
-      sin(x * 2.5 + 1.5) * 0.12 +
-      sin(x * 4.0 + 2.5) * 0.04 +
-      noise(vec2(x * 10.0, 0.0)) * 0.02 + 0.05
-    );
-
+    mountain = max(mountain, sin(x * 1.2 + 0.5) * 0.08 + sin(x * 2.5 + 1.0) * 0.04 + 0.12);
+    mountain = max(mountain, sin(x * 1.8 + 2.0) * 0.1 + sin(x * 3.2 + 0.3) * 0.05 + 0.08);
+    mountain = max(mountain, sin(x * 2.5 + 1.5) * 0.12 + sin(x * 4.0 + 2.5) * 0.04 + noise(vec2(x * 10.0, 0.0)) * 0.02 + 0.05);
     return mountain;
   }
 
   float stars(vec2 uv) {
     float star = 0.0;
-
     for (int i = 0; i < 3; i++) {
       vec2 grid = uv * (50.0 + float(i) * 30.0);
       vec2 id = floor(grid);
       vec2 gv = fract(grid) - 0.5;
-
       float n = hash(id + float(i) * 100.0);
-
       if (n > 0.97) {
         float size = (n - 0.97) * 30.0;
         float twinkle = sin(u_time * (2.0 + n * 3.0) + n * 100.0) * 0.5 + 0.5;
@@ -147,38 +83,77 @@ const fragmentShaderSource = `
         star += smoothstep(0.1 * size, 0.0, d) * twinkle * 0.8;
       }
     }
-
     return star;
   }
 
   void main() {
     vec2 uv = gl_FragCoord.xy / u_resolution;
 
+    // 夜空の背景
     vec3 nightTop = vec3(0.02, 0.02, 0.08);
     vec3 nightBottom = vec3(0.01, 0.01, 0.03);
     vec3 color = mix(nightBottom, nightTop, uv.y);
 
+    // 星
     float starBrightness = stars(uv);
     color += vec3(starBrightness) * vec3(0.9, 0.95, 1.0);
 
-    float aurora = auroraCurtain(uv);
-    vec3 auroraCol = auroraColor(uv.x + uv.y * 0.3, aurora);
+    // 32バンドのオーロラ描画
+    float bandWidth = 1.0 / 32.0;
+    for (int band = 0; band < 32; band++) {
+      float bandX = float(band) * bandWidth;
+      float bandCenter = bandX + bandWidth * 0.5;
 
-    float glow = aurora * 0.5;
-    vec3 glowColor = auroraColor(uv.x, glow) * 0.3;
+      // バンド内の位置
+      float localX = (uv.x - bandX) / bandWidth;
+      if (localX < 0.0 || localX > 1.0) continue;
 
-    color += auroraCol + glowColor;
+      // パレットインデックスを取得 (0-15)
+      int paletteIdx = int(u_bandData[band] * 15.0 + 0.5);
+      vec3 bandColor = getPaletteColor(paletteIdx);
 
+      // オーロラの波形効果
+      float wave = sin(uv.y * 8.0 + u_time * 0.5 + float(band) * 0.3) * 0.05;
+      wave += sin(uv.y * 15.0 - u_time * 0.3 + float(band) * 0.5) * 0.03;
+
+      // カーテン効果 (中心が明るく端が暗い)
+      float curtain = exp(-pow((localX - 0.5) * 2.5, 2.0));
+
+      // 縦方向のグラデーション (上部が明るい)
+      float baseY = 0.5 + wave;
+      float verticalFade = smoothstep(0.15, 0.4, uv.y) * smoothstep(0.85, 0.6, uv.y);
+
+      // オーロラの輝度計算
+      float dist = abs(uv.y - baseY);
+      float glow = exp(-dist * dist * 8.0) * 0.8;
+
+      // 色の合成
+      float intensity = curtain * verticalFade * glow;
+      color += bandColor * intensity * 0.6;
+
+      // グロー効果
+      color += bandColor * curtain * verticalFade * 0.15;
+    }
+
+    // 同期フレームのインジケーター
+    if (u_isSyncFrame > 0.5) {
+      float pulse = sin(u_time * 6.0) * 0.5 + 0.5;
+      float edgeGlow = smoothstep(0.1, 0.0, abs(uv.x - 0.5) - 0.45);
+      color += vec3(0.0, 1.0, 0.5) * pulse * edgeGlow * 0.2;
+    }
+
+    // 山のシルエット
     float mountainHeight = mountains(uv.x * 6.28);
     if (uv.y < mountainHeight) {
       vec3 mountainColor = vec3(0.01, 0.015, 0.025);
-      mountainColor += auroraCol * 0.05 * (mountainHeight - uv.y) * 10.0;
       color = mountainColor;
     }
 
+    // ビネット効果
     float vignette = 1.0 - length((uv - 0.5) * vec2(1.0, 0.6)) * 0.5;
     color *= vignette;
 
+    // ガンマ補正
     color = pow(color, vec3(0.9));
 
     gl_FragColor = vec4(color, 1.0);
@@ -225,88 +200,7 @@ function createProgram(gl: WebGLRenderingContext, vertexShader: WebGLShader, fra
   return program
 }
 
-function splitIntoShares(data: string, numShares: number): Uint8Array[] {
-  const encoder = new TextEncoder()
-  const bytes = encoder.encode(data)
-  const paddedLength = Math.max(bytes.length, 32)
-  const padded = new Uint8Array(paddedLength)
-  padded.set(bytes)
-
-  const shares: Uint8Array[] = []
-
-  for (let i = 0; i < numShares - 1; i++) {
-    const share = new Uint8Array(paddedLength)
-    for (let j = 0; j < paddedLength; j++) {
-      share[j] = Math.floor(Math.random() * 256)
-    }
-    shares.push(share)
-  }
-
-  const lastShare = new Uint8Array(paddedLength)
-  for (let j = 0; j < paddedLength; j++) {
-    let xorResult = padded[j]
-    for (let i = 0; i < numShares - 1; i++) {
-      xorResult ^= shares[i][j]
-    }
-    lastShare[j] = xorResult
-  }
-  shares.push(lastShare)
-
-  return shares
-}
-
-function combineShares(shares: Uint8Array[]): string | null {
-  if (shares.length === 0) return null
-
-  const length = shares[0].length
-  const result = new Uint8Array(length)
-
-  for (let j = 0; j < length; j++) {
-    let xorResult = 0
-    for (const share of shares) {
-      xorResult ^= share[j]
-    }
-    result[j] = xorResult
-  }
-
-  let end = result.length
-  for (let i = 0; i < result.length; i++) {
-    if (result[i] === 0) {
-      end = i
-      break
-    }
-  }
-
-  const decoder = new TextDecoder()
-  return decoder.decode(result.slice(0, end))
-}
-
-function shareToWaveParams(share: Uint8Array): Float32Array {
-  const params = new Float32Array(16)
-  for (let i = 0; i < 16; i++) {
-    const byteIndex = i % share.length
-    params[i] = (share[byteIndex] / 255) * 0.5 + 0.25
-  }
-  return params
-}
-
-function waveParamsToShare(params: Float32Array, length: number = 32): Uint8Array {
-  const share = new Uint8Array(length)
-  for (let i = 0; i < length; i++) {
-    const paramIndex = i % params.length
-    const normalized = (params[paramIndex] - 0.25) / 0.5
-    share[i] = Math.round(Math.max(0, Math.min(255, normalized * 255)))
-  }
-  return share
-}
-
-function lerpParams(a: Float32Array, b: Float32Array, t: number): Float32Array {
-  const result = new Float32Array(16)
-  for (let i = 0; i < 16; i++) {
-    result[i] = a[i] + (b[i] - a[i]) * t
-  }
-  return result
-}
+// 古いユーティリティ関数は新しいlib/に移行済み
 
 // ============================================
 // メインコンポーネント
@@ -321,30 +215,30 @@ export default function AuroraCodeApp() {
   const [scanStatus, setScanStatus] = useState<ScanStatus>('idle')
   const [collectedFrames, setCollectedFrames] = useState(0)
   const [errorMessage, setErrorMessage] = useState('')
-  const [flowPhase, setFlowPhase] = useState(0)
+  const [currentFrameIndex, setCurrentFrameIndex] = useState(0)
   const [cameraReady, setCameraReady] = useState(false)
 
   const [detectionRate, setDetectionRate] = useState(0)
   const [totalAttempts, setTotalAttempts] = useState(0)
   const [successfulDetections, setSuccessfulDetections] = useState(0)
+  const [decoderProgress, setDecoderProgress] = useState<DecoderProgress | null>(null)
 
   const displayCanvasRef = useRef<HTMLCanvasElement>(null)
   const animationRef = useRef<number | null>(null)
   const startTimeRef = useRef(Date.now())
-  const sharesRef = useRef<Uint8Array[]>([])
+  const encodedPacketRef = useRef<EncodedPacket | null>(null)
+  const visualFramesRef = useRef<VisualFrame[]>([])
 
   const videoRef = useRef<HTMLVideoElement>(null)
   const scanCanvasRef = useRef<HTMLCanvasElement>(null)
   const streamRef = useRef<MediaStream | null>(null)
-  const collectedSharesRef = useRef<Map<number, Uint8Array>>(new Map())
+  const decoderRef = useRef<FrameDecoder>(new FrameDecoder())
   const scanAnimationRef = useRef<number | null>(null)
 
-  const TOTAL_FRAMES = 60
-  const REQUIRED_FRAMES = 45
-  const FLOW_SPEED = 0.5
+  const FRAME_RATE = 2 // フレーム/秒
 
   // ============================================
-  // 表示側の実装（連続フロー）
+  // 表示側の実装（新しいフレームベース）
   // ============================================
 
   useEffect(() => {
@@ -372,18 +266,31 @@ export default function AuroraCodeApp() {
     const positionLocation = gl.getAttribLocation(program, 'a_position')
     const timeLocation = gl.getUniformLocation(program, 'u_time')
     const resolutionLocation = gl.getUniformLocation(program, 'u_resolution')
-    const dataWaveLocation = gl.getUniformLocation(program, 'u_dataWave')
-    const flowPhaseLocation = gl.getUniformLocation(program, 'u_flowPhase')
+    const bandDataLocation = gl.getUniformLocation(program, 'u_bandData')
+    const frameIndexLocation = gl.getUniformLocation(program, 'u_frameIndex')
+    const isSyncFrameLocation = gl.getUniformLocation(program, 'u_isSyncFrame')
 
-    sharesRef.current = splitIntoShares(dataInput, TOTAL_FRAMES)
+    // データをエンコード
+    const packet = encodeData(dataInput)
+    encodedPacketRef.current = packet
+
+    // ビジュアルフレームを生成
+    const visuals = packet.frames.map(frame => frameToVisual(frame))
+    visualFramesRef.current = visuals
+
+    let lastFrameTime = Date.now()
+    let currentFrame = 0
 
     const render = () => {
-      if (!isPlaying) {
-        animationRef.current = requestAnimationFrame(render)
-        return
-      }
+      const now = Date.now()
+      const time = (now - startTimeRef.current) / 1000
 
-      const time = (Date.now() - startTimeRef.current) / 1000
+      // フレーム切り替え
+      if (isPlaying && now - lastFrameTime >= 1000 / FRAME_RATE) {
+        currentFrame = (currentFrame + 1) % visuals.length
+        lastFrameTime = now
+        setCurrentFrameIndex(currentFrame)
+      }
 
       const displayWidth = canvas.clientWidth
       const displayHeight = canvas.clientHeight
@@ -406,21 +313,14 @@ export default function AuroraCodeApp() {
       gl.uniform1f(timeLocation, time)
       gl.uniform2f(resolutionLocation, gl.canvas.width, gl.canvas.height)
 
-      const continuousIndex = (time * FLOW_SPEED) % TOTAL_FRAMES
-      const prevIndex = Math.floor(continuousIndex)
-      const nextIndex = (prevIndex + 1) % TOTAL_FRAMES
-      const t = continuousIndex - prevIndex
-
-      const prevShare = sharesRef.current[prevIndex] || new Uint8Array(32)
-      const nextShare = sharesRef.current[nextIndex] || new Uint8Array(32)
-      const prevParams = shareToWaveParams(prevShare)
-      const nextParams = shareToWaveParams(nextShare)
-      const waveParams = lerpParams(prevParams, nextParams, t)
-
-      setFlowPhase(continuousIndex)
-
-      gl.uniform1fv(dataWaveLocation, waveParams)
-      gl.uniform1f(flowPhaseLocation, continuousIndex)
+      // 現在のフレームのバンドデータを設定
+      const visual = visuals[currentFrame]
+      if (visual) {
+        const bandData = bandIndicesToUniform(visual)
+        gl.uniform1fv(bandDataLocation, bandData)
+        gl.uniform1f(frameIndexLocation, visual.frameIndex)
+        gl.uniform1f(isSyncFrameLocation, visual.isSyncFrame ? 1.0 : 0.0)
+      }
 
       gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4)
 
@@ -444,12 +344,13 @@ export default function AuroraCodeApp() {
     setErrorMessage('')
     setCameraReady(false)
     setScanStatus('scanning')
-    collectedSharesRef.current = new Map()
+    decoderRef.current = new FrameDecoder()
     setCollectedFrames(0)
     setScanProgress(0)
     setTotalAttempts(0)
     setSuccessfulDetections(0)
     setDetectionRate(0)
+    setDecoderProgress(null)
 
     try {
       const constraints: MediaStreamConstraints = {
@@ -522,26 +423,27 @@ export default function AuroraCodeApp() {
       ctx.drawImage(video, 0, 0)
 
       const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height)
-      const detectedParams = detectAuroraWaveParams(imageData)
+
+      // 新しい検出アルゴリズムを使用
+      const result = detectFrame(imageData)
 
       localTotalAttempts++
       setTotalAttempts(localTotalAttempts)
 
-      if (detectedParams) {
+      if (result.success && result.frame) {
         localSuccessfulDetections++
         setSuccessfulDetections(localSuccessfulDetections)
 
-        const frameIndex = estimateFrameIndex(detectedParams)
+        // フレームをデコーダーに追加
+        const added = decoderRef.current.addFrame(result.frame)
+        if (added) {
+          const progress = decoderRef.current.getProgress()
+          setDecoderProgress(progress)
+          setCollectedFrames(progress.collected)
+          setScanProgress(progress.percentage)
 
-        if (!collectedSharesRef.current.has(frameIndex)) {
-          const share = waveParamsToShare(detectedParams)
-          collectedSharesRef.current.set(frameIndex, share)
-
-          const collected = collectedSharesRef.current.size
-          setCollectedFrames(collected)
-          setScanProgress((collected / REQUIRED_FRAMES) * 100)
-
-          if (collected >= REQUIRED_FRAMES) {
+          // デコード可能かチェック
+          if (progress.canDecode) {
             decodeCollectedData()
             return
           }
@@ -558,62 +460,7 @@ export default function AuroraCodeApp() {
     processFrame()
   }, [])
 
-  const detectAuroraWaveParams = (imageData: ImageData): Float32Array | null => {
-    const { width, height, data } = imageData
-
-    const waveProfile = new Array(32).fill(0)
-    const columnWidth = Math.floor(width / 32)
-
-    for (let col = 0; col < 32; col++) {
-      const startX = col * columnWidth
-      const endX = Math.min(startX + columnWidth, width)
-
-      let maxBrightness = 0
-      let maxY = 0
-
-      for (let x = startX; x < endX; x++) {
-        for (let y = 0; y < height; y++) {
-          const idx = (y * width + x) * 4
-          const r = data[idx]
-          const g = data[idx + 1]
-          const b = data[idx + 2]
-
-          const auroraBrightness = g * 0.6 + b * 0.3 - r * 0.3
-
-          if (auroraBrightness > maxBrightness && auroraBrightness > 50) {
-            maxBrightness = auroraBrightness
-            maxY = y
-          }
-        }
-      }
-
-      waveProfile[col] = maxY / height
-    }
-
-    const validColumns = waveProfile.filter(v => v > 0.1 && v < 0.9).length
-    if (validColumns < 16) {
-      return null
-    }
-
-    const params = new Float32Array(16)
-    for (let i = 0; i < 16; i++) {
-      let sum = 0
-      for (let j = 0; j < 32; j++) {
-        sum += waveProfile[j] * Math.sin((i + 1) * j * Math.PI / 16)
-      }
-      params[i] = Math.abs(sum / 32) + 0.25
-    }
-
-    return params
-  }
-
-  const estimateFrameIndex = (params: Float32Array): number => {
-    let hash = 0
-    for (let i = 0; i < params.length; i++) {
-      hash = ((hash << 5) - hash + Math.floor(params[i] * 1000)) | 0
-    }
-    return Math.abs(hash) % TOTAL_FRAMES
-  }
+  // 古い検出関数は lib/detection/detector.ts に移行済み
 
   const decodeCollectedData = () => {
     setScanStatus('processing')
@@ -621,16 +468,15 @@ export default function AuroraCodeApp() {
 
     setTimeout(() => {
       try {
-        const shares = Array.from(collectedSharesRef.current.values())
-        const decoded = combineShares(shares)
+        const result = decoderRef.current.decode()
 
-        if (decoded && decoded.length > 0) {
-          setDecodedData(decoded)
+        if (result.success && result.data) {
+          setDecodedData(result.data)
           setScanStatus('success')
         } else {
           setDecodedData('')
           setScanStatus('error')
-          setErrorMessage('データの復号に失敗しました。')
+          setErrorMessage(result.error || 'データの復号に失敗しました。')
         }
       } catch (err) {
         console.error('Decode error:', err)
@@ -650,6 +496,8 @@ export default function AuroraCodeApp() {
     setTotalAttempts(0)
     setSuccessfulDetections(0)
     setDetectionRate(0)
+    setDecoderProgress(null)
+    decoderRef.current = new FrameDecoder()
   }, [stopCamera])
 
   useEffect(() => {
@@ -761,10 +609,10 @@ export default function AuroraCodeApp() {
             zIndex: 10,
           }}>
             <div style={{ fontSize: '9px', color: 'rgba(255,255,255,0.5)', marginBottom: '2px' }}>
-              FLOW
+              FRAME
             </div>
             <div style={{ fontSize: '20px', fontWeight: 700, color: '#10b981', fontFamily: 'monospace' }}>
-              {flowPhase.toFixed(1)}
+              {currentFrameIndex + 1}/{encodedPacketRef.current?.totalFrames || 0}
             </div>
           </div>
 
@@ -977,7 +825,7 @@ export default function AuroraCodeApp() {
                     {scanStatus === 'processing' ? 'Decoding...' : 'Collecting frames...'}
                   </span>
                   <span style={{ color: '#10b981', fontSize: '12px', fontWeight: 600 }}>
-                    {collectedFrames}/{REQUIRED_FRAMES}
+                    {collectedFrames}/{decoderProgress?.required || '?'}
                   </span>
                 </div>
                 <div style={{
