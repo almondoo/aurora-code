@@ -46,6 +46,14 @@ const fragmentShaderSource = `
     return vec3(0.941, 0.627, 0.627);
   }
 
+  // パレット色を補間で取得（グラデーション用）
+  vec3 getPaletteColorSmooth(float idx) {
+    int i0 = int(floor(idx));
+    int i1 = int(ceil(idx));
+    float t = fract(idx);
+    return mix(getPaletteColor(i0), getPaletteColor(i1), t);
+  }
+
   float hash(vec2 p) {
     return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
   }
@@ -59,6 +67,18 @@ const fragmentShaderSource = `
     float c = hash(i + vec2(0.0, 1.0));
     float d = hash(i + vec2(1.0, 1.0));
     return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
+  }
+
+  // フラクタルブラウン運動（より自然な揺らぎ）
+  float fbm(vec2 p) {
+    float value = 0.0;
+    float amplitude = 0.5;
+    for (int i = 0; i < 4; i++) {
+      value += amplitude * noise(p);
+      p *= 2.0;
+      amplitude *= 0.5;
+    }
+    return value;
   }
 
   float mountains(float x) {
@@ -89,50 +109,90 @@ const fragmentShaderSource = `
   void main() {
     vec2 uv = gl_FragCoord.xy / u_resolution;
 
-    // 夜空の背景
-    vec3 nightTop = vec3(0.02, 0.02, 0.08);
-    vec3 nightBottom = vec3(0.01, 0.01, 0.03);
+    // 夜空の背景（より深い青）
+    vec3 nightTop = vec3(0.01, 0.02, 0.06);
+    vec3 nightBottom = vec3(0.005, 0.01, 0.02);
     vec3 color = mix(nightBottom, nightTop, uv.y);
 
     // 星
     float starBrightness = stars(uv);
     color += vec3(starBrightness) * vec3(0.9, 0.95, 1.0);
 
+    // グローバルな水平方向の揺らぎ
+    float globalWave = sin(u_time * 0.3) * 0.02 + fbm(vec2(u_time * 0.1, 0.0)) * 0.01;
+
+    // オーロラの全体的な動き（ゆっくりとした流れ）
+    float flowOffset = u_time * 0.05;
+
     // 32バンドのオーロラ描画
     float bandWidth = 1.0 / 32.0;
+
     for (int band = 0; band < 32; band++) {
-      float bandX = float(band) * bandWidth;
+      // 水平方向の揺らぎ（カーテンが横に揺れる効果）
+      float bandPhase = float(band) * 0.15;
+      float horizontalWave = sin(uv.y * 3.0 + u_time * 0.6 + bandPhase) * 0.015;
+      horizontalWave += sin(uv.y * 7.0 - u_time * 0.4 + bandPhase * 2.0) * 0.008;
+      horizontalWave += fbm(vec2(float(band) * 0.3, uv.y * 2.0 + u_time * 0.2)) * 0.01;
+
+      float bandX = float(band) * bandWidth + horizontalWave + globalWave;
       float bandCenter = bandX + bandWidth * 0.5;
 
-      // バンド内の位置
+      // バンド内の位置（拡張範囲でブレンド）
       float localX = (uv.x - bandX) / bandWidth;
-      if (localX < 0.0 || localX > 1.0) continue;
 
       // パレットインデックスを取得 (0-15)
-      int paletteIdx = int(u_bandData[band] * 15.0 + 0.5);
+      float paletteValue = u_bandData[band] * 15.0;
+      int paletteIdx = int(paletteValue + 0.5);
       vec3 bandColor = getPaletteColor(paletteIdx);
 
-      // オーロラの波形効果
-      float wave = sin(uv.y * 8.0 + u_time * 0.5 + float(band) * 0.3) * 0.05;
-      wave += sin(uv.y * 15.0 - u_time * 0.3 + float(band) * 0.5) * 0.03;
+      // 隣接バンドとの色ブレンド（自然なグラデーション）
+      if (band < 31) {
+        float nextPaletteValue = u_bandData[band + 1] * 15.0;
+        vec3 nextColor = getPaletteColor(int(nextPaletteValue + 0.5));
+        float blendT = smoothstep(0.6, 1.0, localX);
+        bandColor = mix(bandColor, nextColor, blendT * 0.5);
+      }
+      if (band > 0) {
+        float prevPaletteValue = u_bandData[band - 1] * 15.0;
+        vec3 prevColor = getPaletteColor(int(prevPaletteValue + 0.5));
+        float blendT = smoothstep(0.4, 0.0, localX);
+        bandColor = mix(bandColor, prevColor, blendT * 0.5);
+      }
 
-      // カーテン効果 (中心が明るく端が暗い)
-      float curtain = exp(-pow((localX - 0.5) * 2.5, 2.0));
+      // より動的な波形効果
+      float wave = sin(uv.y * 4.0 + u_time * 0.8 + bandPhase) * 0.06;
+      wave += sin(uv.y * 9.0 - u_time * 0.5 + bandPhase * 1.5) * 0.03;
+      wave += fbm(vec2(uv.x * 3.0 + float(band) * 0.2, uv.y * 2.0 + u_time * 0.15)) * 0.04;
 
-      // 縦方向のグラデーション (上部が明るい)
-      float baseY = 0.5 + wave;
-      float verticalFade = smoothstep(0.15, 0.4, uv.y) * smoothstep(0.85, 0.6, uv.y);
+      // ソフトなカーテン効果（バンド境界をぼかす）
+      float curtain = exp(-pow((localX - 0.5) * 1.8, 2.0));
+      // エッジをさらにソフトに
+      curtain *= smoothstep(-0.3, 0.2, localX) * smoothstep(1.3, 0.8, localX);
 
-      // オーロラの輝度計算
+      // 縦方向のグラデーション（上部が明るく、下にフェードアウト）
+      float baseY = 0.55 + wave;
+      float verticalFade = smoothstep(0.12, 0.35, uv.y) * smoothstep(0.88, 0.55, uv.y);
+      // 上部により集中した明るさ
+      verticalFade *= 1.0 + smoothstep(0.5, 0.75, uv.y) * 0.3;
+
+      // オーロラの輝度計算（よりソフトなグロー）
       float dist = abs(uv.y - baseY);
-      float glow = exp(-dist * dist * 8.0) * 0.8;
+      float glow = exp(-dist * dist * 5.0) * 0.9;
+
+      // ノイズベースの明るさ変動
+      float brightnessVar = 0.8 + fbm(vec2(float(band) * 0.5, u_time * 0.3)) * 0.4;
 
       // 色の合成
-      float intensity = curtain * verticalFade * glow;
-      color += bandColor * intensity * 0.6;
+      float intensity = curtain * verticalFade * glow * brightnessVar;
+      color += bandColor * intensity * 0.55;
 
-      // グロー効果
-      color += bandColor * curtain * verticalFade * 0.15;
+      // ソフトグロー効果
+      float softGlow = curtain * verticalFade * 0.12;
+      color += bandColor * softGlow;
+
+      // 上部の発光効果
+      float topGlow = smoothstep(0.5, 0.8, uv.y) * curtain * 0.08;
+      color += bandColor * topGlow * brightnessVar;
     }
 
     // 同期フレームのインジケーター
@@ -149,12 +209,12 @@ const fragmentShaderSource = `
       color = mountainColor;
     }
 
-    // ビネット効果
-    float vignette = 1.0 - length((uv - 0.5) * vec2(1.0, 0.6)) * 0.5;
+    // ソフトなビネット効果
+    float vignette = 1.0 - length((uv - 0.5) * vec2(0.9, 0.5)) * 0.4;
     color *= vignette;
 
     // ガンマ補正
-    color = pow(color, vec3(0.9));
+    color = pow(color, vec3(0.85));
 
     gl_FragColor = vec4(color, 1.0);
   }
@@ -422,7 +482,12 @@ export default function AuroraCodeApp() {
 
       ctx.drawImage(video, 0, 0)
 
-      const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height)
+      // 中央50%の領域のみを読み取り対象にする
+      const centerWidth = Math.floor(canvas.width * 0.5)
+      const centerHeight = Math.floor(canvas.height * 0.5)
+      const offsetX = Math.floor((canvas.width - centerWidth) / 2)
+      const offsetY = Math.floor((canvas.height - centerHeight) / 2)
+      const imageData = ctx.getImageData(offsetX, offsetY, centerWidth, centerHeight)
 
       // 新しい検出アルゴリズムを使用
       const result = detectFrame(imageData)
@@ -804,10 +869,35 @@ export default function AuroraCodeApp() {
                 <div style={{
                   position: 'absolute',
                   inset: 0,
-                  border: '2px solid rgba(16, 185, 129, 0.5)',
+                  border: '2px solid rgba(16, 185, 129, 0.3)',
                   borderRadius: '12px',
                   pointerEvents: 'none',
                 }} />
+
+                {/* 中央50%の読み取り領域を示すガイド枠 */}
+                <div style={{
+                  position: 'absolute',
+                  top: '25%',
+                  left: '25%',
+                  width: '50%',
+                  height: '50%',
+                  border: '2px solid rgba(16, 185, 129, 0.9)',
+                  borderRadius: '8px',
+                  pointerEvents: 'none',
+                  boxShadow: '0 0 0 9999px rgba(0, 0, 0, 0.4)',
+                }}>
+                  <div style={{
+                    position: 'absolute',
+                    top: '-20px',
+                    left: '50%',
+                    transform: 'translateX(-50%)',
+                    fontSize: '10px',
+                    color: 'rgba(16, 185, 129, 0.9)',
+                    whiteSpace: 'nowrap',
+                  }}>
+                    Scan Area
+                  </div>
+                </div>
               </div>
 
               <div style={{
