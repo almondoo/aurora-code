@@ -49,13 +49,13 @@ export function findAuroraRegion(imageData: ImageData): AuroraRegion | null {
       const g = data[idx + 1]
       const b = data[idx + 2]
 
-      // オーロラ色検出: 緑-シアン-紫系
-      // 緑系: G > R かつ G > 50
-      // シアン系: G > R かつ B > R かつ (G + B) > 100
-      // 紫系: B > R かつ (R + B) > 100
-      const isGreenish = g > r * 1.2 && g > 50
-      const isCyanish = g > r && b > r * 0.8 && (g + b) > 100
-      const isPurplish = b > r * 0.8 && r > g * 0.5 && (r + b) > 100
+      // オーロラ色検出: 緑-シアン-紫系（閾値を緩和）
+      // 緑系: G > R かつ G > 30
+      // シアン系: G > R かつ B > R かつ (G + B) > 80
+      // 紫系: B > R かつ (R + B) > 80
+      const isGreenish = g > r * 1.1 && g > 30
+      const isCyanish = g > r * 0.9 && b > r * 0.6 && (g + b) > 80
+      const isPurplish = b > r * 0.6 && r > g * 0.4 && (r + b) > 80
 
       if (isGreenish || isCyanish || isPurplish) {
         const brightness = (r + g + b) / 3
@@ -113,8 +113,8 @@ export function findAuroraRegion(imageData: ImageData): AuroraRegion | null {
     }
   }
 
-  // 領域が小さすぎる場合は無効
-  if (bottom - top < height * 0.1 || rightBound - leftBound < width * 0.5) {
+  // 領域が小さすぎる場合は無効（閾値を緩和: 0.1→0.05, 0.5→0.3）
+  if (bottom - top < height * 0.05 || rightBound - leftBound < width * 0.3) {
     return null
   }
 
@@ -150,8 +150,8 @@ export function extractBandColors(
         const b = data[idx + 2]
         const brightness = r + g + b
 
-        // 暗すぎるピクセルは除外
-        if (brightness > 60) {
+        // 暗すぎるピクセルは除外（閾値を緩和: 60 → 30）
+        if (brightness > 30) {
           pixels.push({ r, g, b, brightness })
         }
       }
@@ -226,8 +226,8 @@ export function detectFrame(imageData: ImageData): DetectionResult {
   const avgConfidence =
     confidences.reduce((s, c) => s + c, 0) / confidences.length
 
-  // 信頼度が低すぎる場合は失敗
-  if (avgConfidence < 0.3) {
+  // 信頼度が低すぎる場合は失敗（閾値を緩和: 0.3 → 0.15）
+  if (avgConfidence < 0.15) {
     return {
       success: false,
       confidence: avgConfidence,

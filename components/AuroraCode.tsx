@@ -128,11 +128,9 @@ const fragmentShaderSource = `
     float bandWidth = 1.0 / 32.0;
 
     for (int band = 0; band < 32; band++) {
-      // 水平方向の揺らぎ（カーテンが横に揺れる効果）
+      // 水平方向の揺らぎ（検出率向上のため最小化）
       float bandPhase = float(band) * 0.15;
-      float horizontalWave = sin(uv.y * 3.0 + u_time * 0.6 + bandPhase) * 0.015;
-      horizontalWave += sin(uv.y * 7.0 - u_time * 0.4 + bandPhase * 2.0) * 0.008;
-      horizontalWave += fbm(vec2(float(band) * 0.3, uv.y * 2.0 + u_time * 0.2)) * 0.01;
+      float horizontalWave = sin(uv.y * 3.0 + u_time * 0.6 + bandPhase) * 0.002;
 
       float bandX = float(band) * bandWidth + horizontalWave + globalWave;
       float bandCenter = bandX + bandWidth * 0.5;
@@ -145,29 +143,27 @@ const fragmentShaderSource = `
       int paletteIdx = int(paletteValue + 0.5);
       vec3 bandColor = getPaletteColor(paletteIdx);
 
-      // 隣接バンドとの色ブレンド（自然なグラデーション）
-      if (band < 31) {
-        float nextPaletteValue = u_bandData[band + 1] * 15.0;
-        vec3 nextColor = getPaletteColor(int(nextPaletteValue + 0.5));
-        float blendT = smoothstep(0.6, 1.0, localX);
-        bandColor = mix(bandColor, nextColor, blendT * 0.5);
-      }
-      if (band > 0) {
-        float prevPaletteValue = u_bandData[band - 1] * 15.0;
-        vec3 prevColor = getPaletteColor(int(prevPaletteValue + 0.5));
-        float blendT = smoothstep(0.4, 0.0, localX);
-        bandColor = mix(bandColor, prevColor, blendT * 0.5);
-      }
+      // 隣接バンドとの色ブレンド（検出率向上のため無効化）
+      // if (band < 31) {
+      //   float nextPaletteValue = u_bandData[band + 1] * 15.0;
+      //   vec3 nextColor = getPaletteColor(int(nextPaletteValue + 0.5));
+      //   float blendT = smoothstep(0.6, 1.0, localX);
+      //   bandColor = mix(bandColor, nextColor, blendT * 0.5);
+      // }
+      // if (band > 0) {
+      //   float prevPaletteValue = u_bandData[band - 1] * 15.0;
+      //   vec3 prevColor = getPaletteColor(int(prevPaletteValue + 0.5));
+      //   float blendT = smoothstep(0.4, 0.0, localX);
+      //   bandColor = mix(bandColor, prevColor, blendT * 0.5);
+      // }
 
-      // より動的な波形効果
-      float wave = sin(uv.y * 4.0 + u_time * 0.8 + bandPhase) * 0.06;
-      wave += sin(uv.y * 9.0 - u_time * 0.5 + bandPhase * 1.5) * 0.03;
-      wave += fbm(vec2(uv.x * 3.0 + float(band) * 0.2, uv.y * 2.0 + u_time * 0.15)) * 0.04;
+      // 波形効果（検出率向上のため最小化）
+      float wave = sin(uv.y * 4.0 + u_time * 0.8 + bandPhase) * 0.005;
+      wave += sin(uv.y * 9.0 - u_time * 0.5 + bandPhase * 1.5) * 0.002;
+      wave += fbm(vec2(uv.x * 3.0 + float(band) * 0.2, uv.y * 2.0 + u_time * 0.15)) * 0.003;
 
-      // ソフトなカーテン効果（バンド境界をぼかす）
-      float curtain = exp(-pow((localX - 0.5) * 1.8, 2.0));
-      // エッジをさらにソフトに
-      curtain *= smoothstep(-0.3, 0.2, localX) * smoothstep(1.3, 0.8, localX);
+      // シャープなバンド境界（検出率向上のため）
+      float curtain = smoothstep(0.0, 0.1, localX) * smoothstep(1.0, 0.9, localX);
 
       // 縦方向のグラデーション（上部が明るく、下にフェードアウト）
       float baseY = 0.55 + wave;
@@ -482,9 +478,9 @@ export default function AuroraCodeApp() {
 
       ctx.drawImage(video, 0, 0)
 
-      // 中央50%の領域のみを読み取り対象にする
-      const centerWidth = Math.floor(canvas.width * 0.5)
-      const centerHeight = Math.floor(canvas.height * 0.5)
+      // 中央70%の領域を読み取り対象にする（検出率向上のため拡大: 50% → 70%）
+      const centerWidth = Math.floor(canvas.width * 0.7)
+      const centerHeight = Math.floor(canvas.height * 0.7)
       const offsetX = Math.floor((canvas.width - centerWidth) / 2)
       const offsetY = Math.floor((canvas.height - centerHeight) / 2)
       const imageData = ctx.getImageData(offsetX, offsetY, centerWidth, centerHeight)
@@ -892,13 +888,13 @@ export default function AuroraCodeApp() {
                   pointerEvents: 'none',
                 }} />
 
-                {/* 中央50%の読み取り領域を示すガイド枠 */}
+                {/* 中央70%の読み取り領域を示すガイド枠 */}
                 <div style={{
                   position: 'absolute',
-                  top: '25%',
-                  left: '25%',
-                  width: '50%',
-                  height: '50%',
+                  top: '15%',
+                  left: '15%',
+                  width: '70%',
+                  height: '70%',
                   border: '2px solid rgba(16, 185, 129, 0.9)',
                   borderRadius: '8px',
                   pointerEvents: 'none',
