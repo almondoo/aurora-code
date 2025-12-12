@@ -654,110 +654,128 @@ export default function AuroraCodeApp() {
 
       {/* 表示モード */}
       {mode === 'display' && (
-        <>
-          <canvas
-            ref={displayCanvasRef}
-            style={{
-              width: '100%',
-              height: '100%',
-              display: 'block',
-            }}
-          />
-
+        <div style={{
+          flex: 1,
+          display: 'flex',
+          flexDirection: 'column',
+          alignItems: 'center',
+          justifyContent: 'center',
+          padding: '70px 20px 20px',
+        }}>
+          {/* オーロラ表示エリア */}
           <div style={{
-            position: 'absolute',
-            top: '70px',
-            right: '20px',
-            background: 'rgba(0,0,0,0.7)',
-            padding: '8px 12px',
-            borderRadius: '8px',
-            zIndex: 10,
+            width: '640px',
+            height: '640px',
+            maxWidth: 'calc(100vw - 40px)',
+            maxHeight: 'calc(100vh - 250px)',
+            aspectRatio: '1',
+            borderRadius: '16px',
+            overflow: 'hidden',
+            boxShadow: '0 0 60px rgba(16, 185, 129, 0.3)',
+            position: 'relative',
           }}>
-            <div style={{ fontSize: '9px', color: 'rgba(255,255,255,0.5)', marginBottom: '2px' }}>
-              FRAME
-            </div>
-            <div style={{ fontSize: '20px', fontWeight: 700, color: '#10b981', fontFamily: 'monospace' }}>
-              {currentFrameIndex + 1}/{encodedPacketRef.current?.totalFrames || 0}
-            </div>
-          </div>
-
-          <div style={{
-            position: 'absolute',
-            top: '70px',
-            left: '20px',
-            display: 'flex',
-            alignItems: 'center',
-            gap: '8px',
-            zIndex: 10,
-          }}>
-            <div style={{
-              width: '8px',
-              height: '8px',
-              borderRadius: '50%',
-              background: isPlaying ? '#10b981' : '#f59e0b',
-              boxShadow: isPlaying ? '0 0 10px #10b981' : 'none',
-            }} />
-            <span style={{ fontSize: '11px', color: 'rgba(255,255,255,0.6)' }}>
-              {isPlaying ? 'Broadcasting' : 'Paused'}
-            </span>
-          </div>
-
-          <div style={{
-            position: 'absolute',
-            bottom: 0,
-            left: 0,
-            right: 0,
-            padding: '20px',
-            background: 'linear-gradient(to top, rgba(0,0,0,0.9) 0%, transparent 100%)',
-            zIndex: 10,
-          }}>
-            <div style={{ maxWidth: '450px', margin: '0 auto' }}>
-              <label style={{
+            <canvas
+              ref={displayCanvasRef}
+              style={{
+                width: '100%',
+                height: '100%',
                 display: 'block',
-                fontSize: '10px',
-                color: 'rgba(255,255,255,0.4)',
-                marginBottom: '6px',
-                textTransform: 'uppercase',
-                letterSpacing: '1px',
-              }}>
-                Secret Message
-              </label>
-              <div style={{ display: 'flex', gap: '8px' }}>
-                <input
-                  type="text"
-                  value={dataInput}
-                  onChange={(e) => setDataInput(e.target.value)}
-                  placeholder="Enter secret message..."
-                  style={{
-                    flex: 1,
-                    padding: '10px 14px',
-                    borderRadius: '8px',
-                    border: '1px solid rgba(255,255,255,0.15)',
-                    background: 'rgba(255,255,255,0.08)',
-                    color: '#fff',
-                    fontSize: '14px',
-                    outline: 'none',
-                  }}
-                />
-                <button
-                  onClick={() => setIsPlaying(!isPlaying)}
-                  style={{
-                    padding: '10px 16px',
-                    borderRadius: '8px',
-                    border: 'none',
-                    background: isPlaying ? 'rgba(239, 68, 68, 0.8)' : 'rgba(16, 185, 129, 0.8)',
-                    color: '#fff',
-                    fontSize: '12px',
-                    fontWeight: 600,
-                    cursor: 'pointer',
-                  }}
-                >
-                  {isPlaying ? '||' : '>'}
-                </button>
+              }}
+            />
+
+            {/* フレームカウンター */}
+            <div style={{
+              position: 'absolute',
+              top: '12px',
+              right: '12px',
+              background: 'rgba(0,0,0,0.7)',
+              padding: '8px 12px',
+              borderRadius: '8px',
+            }}>
+              <div style={{ fontSize: '9px', color: 'rgba(255,255,255,0.5)', marginBottom: '2px' }}>
+                FRAME
+              </div>
+              <div style={{ fontSize: '20px', fontWeight: 700, color: '#10b981', fontFamily: 'monospace' }}>
+                {currentFrameIndex + 1}/{encodedPacketRef.current?.totalFrames || 0}
               </div>
             </div>
+
+            {/* ステータス */}
+            <div style={{
+              position: 'absolute',
+              top: '12px',
+              left: '12px',
+              display: 'flex',
+              alignItems: 'center',
+              gap: '8px',
+              background: 'rgba(0,0,0,0.7)',
+              padding: '8px 12px',
+              borderRadius: '8px',
+            }}>
+              <div style={{
+                width: '8px',
+                height: '8px',
+                borderRadius: '50%',
+                background: isPlaying ? '#10b981' : '#f59e0b',
+                boxShadow: isPlaying ? '0 0 10px #10b981' : 'none',
+              }} />
+              <span style={{ fontSize: '11px', color: 'rgba(255,255,255,0.6)' }}>
+                {isPlaying ? 'Broadcasting' : 'Paused'}
+              </span>
+            </div>
           </div>
-        </>
+
+          {/* 入力パネル */}
+          <div style={{
+            marginTop: '20px',
+            width: '100%',
+            maxWidth: '450px',
+          }}>
+            <label style={{
+              display: 'block',
+              fontSize: '10px',
+              color: 'rgba(255,255,255,0.4)',
+              marginBottom: '6px',
+              textTransform: 'uppercase',
+              letterSpacing: '1px',
+            }}>
+              Secret Message
+            </label>
+            <div style={{ display: 'flex', gap: '8px' }}>
+              <input
+                type="text"
+                value={dataInput}
+                onChange={(e) => setDataInput(e.target.value)}
+                placeholder="Enter secret message..."
+                style={{
+                  flex: 1,
+                  padding: '10px 14px',
+                  borderRadius: '8px',
+                  border: '1px solid rgba(255,255,255,0.15)',
+                  background: 'rgba(255,255,255,0.08)',
+                  color: '#fff',
+                  fontSize: '14px',
+                  outline: 'none',
+                }}
+              />
+              <button
+                onClick={() => setIsPlaying(!isPlaying)}
+                style={{
+                  padding: '10px 16px',
+                  borderRadius: '8px',
+                  border: 'none',
+                  background: isPlaying ? 'rgba(239, 68, 68, 0.8)' : 'rgba(16, 185, 129, 0.8)',
+                  color: '#fff',
+                  fontSize: '12px',
+                  fontWeight: 600,
+                  cursor: 'pointer',
+                }}
+              >
+                {isPlaying ? '||' : '>'}
+              </button>
+            </div>
+          </div>
+        </div>
       )}
 
       {/* スキャンモード */}
